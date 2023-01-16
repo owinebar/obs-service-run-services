@@ -1,0 +1,13 @@
+
+This is a source service for Open Build Service.
+Instead of running a set of services in the "_services" file based on a given mode, it will run
+the sequence of services in a user-specified file.  The intermediate files are not deleted
+so that services may chain intermediate results without having to commit them
+Any failure in the sequence will cause the service to abort without executing additional services.
+
+This is particularly intended to be used in conjunction with pattern-service, so the resource limits
+apply only to specified services after generation, not to the generation process itself.
+
+
+
+
