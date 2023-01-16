@@ -1,0 +1,56 @@
+<service name="run-services">
+  <summary>Run sequence of services from user specified file</summary>
+  <description>
+		No service is allowed to generate a _service file or to replace the table file.
+	       </description>
+  <parameter name="services-file">
+    <description>The services file to run</description>
+    <required/>
+  </parameter>
+  <parameter name="services-limit">
+    <description>.The maximum number of services allowed in a sequence.
+    		  If the host has configured a limit, the limit will be the minimum of the two.
+		  The default is no limit.
+  </parameter>
+  <parameter name="cpu-limit">
+    <description>.The limit for cpu time the sequence of services may consume in seconds.
+    		  If the host has configured a limit, the limit will be the minimum of the two.
+		  The default is no limit.
+  </parameter>
+  <parameter name="memory-limit">
+    <description>.The limit for memory each service is allowed.
+    		  If the host has configured a limit, the limit will be the minimum of the two.
+		  The default is no limit.
+  </parameter>
+  <parameter name="stack-limit">
+    <description>.The limit for the stack size each service process may use in kB.
+    		  If the host has configured a limit, the limit will be the minimum of the two.
+		  The default is no limit.
+  </parameter>
+  <parameter name="file-size-limit">
+    <description>.The limit for the total size of all files created by the sequence of services in kB.
+    		  If the host has configured a limit, the limit will be the minimum of the two.
+		  The default is no limit.
+  </parameter>
+  <parameter name="excluded-service">
+    <description> A service that is not allowed to be run.
+    	          By default the list of excluded services consists of "pattern-service" and "run-service".
+		  The host may configure additional services to exclude.
+		  Any entry here will be added to the list.
+		  This parameter may be specified multiple times
+  </parameter>
+  <parameter name="excluded-output">
+    <description> List of regular expressions (as specified for grep -E)
+    		  files that are not allowed to be created.
+    		  Creation of any file matching a pattern in this list
+		  by a service will cause the service  to abort without copying the result
+		  to the project directory.
+    	          By default the list consists of "_service".
+		  The host may configure additional files to exclude.
+		  Any entry here will be added to the list.
+		  This parameter may be specified multiple times
+		  In addition to this list, any file name that requires quoting
+		  as bash input is excluded.
+  </parameter>
+</service>
+
