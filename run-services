@@ -96,10 +96,10 @@ run() {
 	done
 	case "$svc_mode" in
 	    default | serveronly )
-		cp "$odir/$x" "_source:$0:$x"
+		cp "$odir/$x" "$outpath/_source:$0:$x"
 		;;
 	    *)
-		cp "$odir/$x" "$x"
+		cp "$odir/$x" "$outpath/$x"
 		;;
 	esac
     done
@@ -488,7 +488,8 @@ for (( i = 0; i < N ; i++ )); do
     done
     (( k = 2 * M ))
     (( k_1 = k + 1 ))
+    odir="$(mktemp -d -p $serviced)"
     cmd_args[$k]="--outdir"
     cmd_args[$k_1]="$odir"
-    run "$ul_flags" "$outpath" "$i" "$svc_mode" "$cmd_args[@]"
+    run "$ul_flags" "$odir" "$i" "$svc_mode" "$cmd_args[@]"
 done
