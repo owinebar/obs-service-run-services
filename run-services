@@ -1,0 +1,492 @@
+#!/bin/bash
+
+full_service="$(realpath "$0")"
+service_name="$(basename "$0")"
+service_dir="$(dirname "$full_service")"
+if [ "$service_name" = "bash" ]; then
+    echo "Service name not recognized" >&2
+    exit 1
+fi
+#  See regexp-quote.sed for readable,commented version
+
+ssed() {
+    sed --sandbox -En "$@"
+}
+legal_name() {
+    local s="$1" tmp
+    [ "$s" ] || return 1
+    printf -v tmp "%q" "$s"
+    [ "$s" != "$tmp" ] && return 1
+    [ "${s/\/}" != "$s" ] && return 1
+    echo "$s"
+}
+legal_list() {
+    local s="$1" tmp
+    printf -v tmp "%q" "$s"
+    [ "$s" != "$tmp" ] && return 1
+    [ "${s/\/}" != "$s" ] && return 1
+    echo "$s"
+}
+if ! (legal_name "$service_name" >/dev/null 2>&1); then
+    echo "Service name must not contain : or shell special characters: '$service_name'" >&2
+    exit 1
+fi
+serviced=$(mktemp -d)
+DEBUG=1
+on_error() {
+    local last_command="$BASH_COMMAND"
+    local last_line="${BASH_LINENO[0]}"
+    local last_src="${BASH_SOURCE[0]}"
+    echo "Error in service $service_name" >&2
+    if (( $DEBUG )); then
+	printf "%s:%s\t%s\n" "$last_src" "$last_line" "$last_command" >&2
+    fi
+    exit 1
+}
+cleanup() {
+   [ -d "$serviced" ] && rm -Rf "$serviced"
+}
+trap cleanup EXIT
+trap on_error ERR
+declare -a services
+
+run() {
+    local ul_flags="$1"
+    local odir="$2"
+    local svc_no="$3"
+    local svc_mode="$4"
+    shift 4
+    trap on_error ERR
+    if [ "$ul_flags" ]; then
+	## some flags specified
+	( ulimit $ul_flags >/dev/null 2>&1
+	  eval "$@"
+	)
+    else
+	( eval "$@" )
+    fi
+    local x i M p
+    M=${#excluded_output[@]}
+    for x in ls -A "$odir"; do
+	if [ \! -f "$odir/$x" ]; then
+	    continue
+	fi
+	for (( i = 0; i < M ; i++ )); do
+	    p="${excluded_output[$i]}"
+	    if (printf "%s\n" "$x" | grep -Eq "$p"); then
+		echo "Output file $x from service $svc_no not allowed." >&2
+		echo "Command line: $@" >&2
+		echo "Aborting" >&2
+	    fi
+	done
+    done
+    for x in ls -A "$odir"; do
+	if [ \! -f "$odir/$x" ]; then
+	    continue
+	fi
+	for (( i = 0; i < M ; i++ )); do
+	    p="${excluded_output[$i]}"
+	    if (printf "%s\n" "$x" | grep -Eq "$p"); then
+		echo "Output file $x from service $svc_no not allowed." >&2
+		echo "Command line: $@" >&2
+		echo "Aborting" >&2
+	    fi
+	done
+	case "$svc_mode" in
+	    default | serveronly )
+		cp "$odir/$x" "_source:$0:$x"
+		;;
+	    *)
+		cp "$odir/$x" "$x"
+		;;
+	esac
+    done
+	     
+}
+
+get_min() {
+    local val="$1"
+    if [ -n "$2" ]; then
+	if [ -z "$val" ]; then
+	    val="$2"
+	elif (( ${val} > "$2" )); then
+	    val="$2"
+	fi
+    fi
+}
+get_max() {
+    local val="$1"
+    if [ -n "$2" ]; then
+	if [ -z "$val" ]; then
+	    val="$2"
+	elif (( ${val} < "$2" )); then
+	    val="$2"
+	fi
+    fi
+}
+check_legal() {
+    local val="$1"
+    local check="$2"
+    local signal_err="$3"
+    echo "$check"
+    if [ -z "$check" ] || [ "${val}" != "$check" ]; then
+	if [ "${signal_err}" ]; then
+	    case "${signal_err}" in
+		0 | [fF]*)
+		    :
+		    ;;
+		*)
+		    exit 1
+		    ;;
+	    esac
+	fi
+    fi
+}
+
+int_re='/^[-+]?[0-9]+/ { h ; s/^([-+]?[0-9]+).*$/\1/ ; p ; q } ; q'
+pos_int_re='/^[0-9]+/ { h ; s/^([0-9]+).*$/\1/ ; p ; q } ; q'
+
+check_integer() {
+    local val="$1"
+    local min="$2"
+    local max="$3"
+    shift 3
+    local signal_err="$@"
+    [ "$val" ] || return;
+    local check="$(printf "%s" "$val" |
+    	  	   ssed -ze "$int_re" |
+		   tr -d '\000')"    
+    val="$(check_legal "$val" "$check" $signal_err)" || exit #?
+    val="$(get_max "$val" "$min")"
+    val="$(get_min "$val" "$max")"
+    echo "${val}"
+}
+
+check_positive_integer() {
+    local val="$1"
+    local max="$2"
+    shift 2
+    local signal_err="$@"
+    [ "$val" ] || return;
+    local check="$(printf "%s" "$val" |
+    	  	   ssed -ze "$pos_int_re" |
+		   tr -d '\000')"
+    val="$(check_legal "$val" "$check" $signal_err)" || exit #?
+    val="$(get_min "$val" "$max")"
+    return ${val}
+    
+}
+
+check_path() {
+    local tmp
+    local base="$1"
+    local full="$2"
+    local desc="$3"
+    tmp="$(realpath --relative-base="$(realpath "${base}")" "$full")"
+    case "$tmp" in
+	/*)
+	    echo "Illegal ${desc} file name: $full" >&2
+	    exit 1
+	    ;;
+    esac
+    echo "$tmp"
+}
+
+check_file_exists() {
+    local fname="$1"
+    if [ \! -e "$fname" ] || [ \! -f "$fname" ]; then
+	echo "File '$fname' does not exist or is not a regular file" >&2
+	exit 1
+    fi
+}
+
+check_system_posint() {
+    local tmp
+    local given="$1"
+    local name="$2"
+    tmp="$(check_positive_integer "${given}" "" 1)" || {
+	echo "$name limit must be positive integer, given: '$given'" >&2
+	exit 1
+    }
+    echo "$tmp"
+}
+check_system_int() {
+    local tmp
+    local given="$1"
+    local name="$2"
+    local min="$3"
+    local max="$4"
+    if ! tmp="$(check_integer "${given}" "$min" "$max" 1)"; then
+	echo "System $name limit must be integer, given: '$given'" >&2
+	exit 1
+    fi
+    if [ "$tmp" -ne "$given" ]; then
+	echo "System $name limit must be between '$min' and '$max', given: '$given'" >&2
+	exit 1
+    fi
+    echo "$tmp"
+}
+available_services() {
+    local -a svcs
+    local tmp
+    for s in $(ls "$service_dir" | grep -v '.service$'); do
+	! [ -f "$s" ] && continue
+	! [ -x "$s" ] && continue
+	printf -v tmp "%q" "$s"
+	if [ "$tmp" != "$s" ] || [ "${s//:}" != "$s" ] ; then
+	    echo "Warning: discarding service '$s' due to illegal characters in name" >&2
+	    continue
+	fi
+  	svcs[${#$svcs[@]}]="$s"
+    done
+    ( IFS=":"; echo "${svcs[*]}" )
+}
+list_add_elt() {
+    local elt="$1"
+    local ls="$2"
+    local tmp
+    #  Ensure we never have any potential problems
+    printf -v tmp "%q" "$elt"
+    if [ -z "$s" ] ||
+	   [ "$tmp" != "$elt" ] ||
+	   [ "${elt//:}" != "$elt" ] ; then
+	echo "Warning: discarding '$s' due to containing either no or illegal characters" >&2
+	echo "$ls"
+	return
+    fi
+  
+    case "$ls" in
+	"$elt":* | *:"$elt" | *:"$elt":* | "$elt")
+	    :
+	    ;;
+	*)
+	    ls="${ls}${ls:+:}$elt"
+	    ;;
+    esac
+    echo "$ls"
+}
+list_member() {
+    local elt="$1"
+    local ls="$2"
+    case ls in
+	"$elt":* | *:"$elt" | *:"$elt":* | "$elt")
+	    echo -n "$elt"
+	    return 0
+	    ;;
+	*)
+	    return 1
+	    ;;
+    esac
+    # should not happen
+    return 1
+}
+
+
+check_services() {
+    local allowed="$1"
+    local excluded="$2"
+    local s ls=""
+    if [ -z "$allowed" ]; then
+	allowed="$(available-services)"
+    fi
+    for s in ${allowed//:/ }; do
+	list_member "$s" "$excluded" || continue
+	ls="$(list_add_elt "$s" "$ls")"
+    done
+    echo "$ls"
+}
+
+# these values may be set by the system configuration file
+system_cpu_limit=""
+system_memory_limit=""
+system_stack_limit=""
+system_file_size_limit=""
+system_service_limit=""
+system_allowed_services=""
+system_excluded_services=""
+declare -a system_excluded_output
+system_config="/etc/obs/service/$service_name"
+if [ -e "$system_config" ]; then
+    . "$system_config"
+fi
+# Make sure the system defaults are legal
+system_cpu_limit="$(check_system_posint "${system_cpu_limit}" "CPU")"
+system_memory_limit="$(check_system_posint "${system_memory_limit}" "memory")"
+system_stack_limit="$(check_system_posint "${system_stack_limit}" "stack")"
+system_file_size_limit="$(check_system_posint "${system_file_size_limit}" "file size")"
+system_service_limit="$(check_system_posint "${system_service_limit}" "number of services")"
+system_allowed_services="$(legal_list "${system_allowed_services}")"
+system_excluded_services="$(list_add_elt "$service_name" "$system_excluded_services")"
+script=""
+infile=""
+outfile=""
+outdir=""
+template_file="$(mktemp -p $serviced)"
+cpu_limit=""
+memory_limit=""
+stack_limit=""
+file_size_limit=""
+service_limit=""
+allowed_services=""
+excluded_services=""
+declare -a excluded_output
+
+declare -a tmpls tmpl_svcs tmpl_tps
+
+while [ $# -gt 0 ]; do
+    case $1 in
+	--services-file)
+	    tmp="$(check_path "$(pwd)" "$2" "services file")"
+	    infile="$tmp"
+	    ;;
+	--cpu-limit)
+	    cpu_limit="$(check_positive_integer "$2" "${system_memory_limit}")" 
+	    ;;
+	--memory-limit)
+	    memory_limit="$(check_positive_integer "$2" "${system_memory_limit}")" 
+	    ;;
+	--stack-limit)
+	    stack_limit="$(check_positive_integer "$2" "${system_stack_limit}")" 
+	    ;;
+	--file-size-limit)
+	    file_size_limit="$(check_positive_integer "$2" "${system_file_size_limit}")"
+	    ;;
+	--service-limit)
+	    service_limit="$(check_positive_integer "$2" "${system_service_limit}")"
+	    ;;
+	--excluded-service)
+	    tmp="$(legal_name "$2")"
+	    if [ -z "$tmp" ]; then
+		echo "Illegal excluded service name $2, aborting" >&2
+		exit 1
+	    fi
+	    excluded_services="$(list_add_elt "$tmp" "$excluded_services")"
+	    ;;
+	--excluded-output)
+	    excluded_output[${#excluded_output[@]}]="$2"
+	    ;;
+	--outdir)
+	    outdir="$2"
+	    ;;
+	*)
+	    echo "Unrecognized option(s) '$@'" >&2
+	    exit 1
+	    ;;
+    esac
+    shift 2
+done
+
+if [ -z "$infile" ]; then
+    echo "No services file was specified, aborting" >&2
+    exit 1
+fi
+check_file_exists "$infile"
+if [ -z "$outdir" ]; then
+    echo "Output directory name must be specified!" >&2
+    exit 1
+fi
+outpath="$(realpath "${outdir}")"
+tmp="$(dirname "${outpath}")"
+mkdir -p "$tmp"
+if [ \! -d "$tmp" ]; then
+    echo "Destination directory for $outfile in $outdir does not exist and could not be created" >&2
+    exit 1
+fi
+# Set up allowed/excluded service
+tmp="$excluded_services"
+excluded_services="${system_excluded_services}"
+for x in ${tmp/:/ }; do
+    excluded_services="$(list_add_elt "$x" "$excluded_services")"
+done
+allowed_services="$(check_services "$system_allowed_services" "$excluded_services")"
+declare -a svcs svc_mode
+
+ulimit_flags=""
+if [ "$cpu_limit" ]; then
+    ulimit_flags="$ulimit_flags -t $cpu_limit"
+fi
+if [ "$memory_limit" ]; then
+    ulimit_flags="$ulimit_flags -m $memory_limit"
+fi
+if [ "$stack_limit" ]; then
+    ulimit_flags="$ulimit_flags -s $stack_limit"
+fi
+if [ "$file_size_limit" ]; then
+    ulimit_flags="$ulimit_flags -f $file_size_limit"
+fi
+
+
+
+check_param_names() {
+    local svc_no="$1"
+    local -a pnames
+    local tmp
+    xml sel -t -m '/services/service[$svc_no]/param/@name' -v '.' -n "$infile" | while read -a name; do
+	if (( ${#name[@]} != 1 )); then
+	    echo "Illegal parameter name: ${name[@]}" >&2
+	    exit 1
+	fi
+	printf -v tmp "%q" "$name"
+	if [ "$tmp" != "$name" ]; then
+	    echo "Illegal parameter name: ${name}" >&2
+	    exit 1
+	fi
+	pnames[${#pnames[@]}]="$name"
+    done
+    echo "${pnames[@]}"
+}
+
+i=0
+i_1=1
+xml sel -t -m '/services/service/@name' -v '.' -n "$infile" | while read -a name; do
+    if (( ${#name[@]} != 1 )); then
+	echo "Illegal service name: ${name[@]}" >&2
+	exit 1
+    fi
+    if ! list_member "$name" "$allowed_services"; then
+	echo "Illegal service name: ${name[@]}" >&2
+	exit 1
+    fi
+    svcs[$i]="$name"
+    svc_modes[$i]="$(xml_sel -t -m '/services/service[$i_1]/@mode' -v '.')"
+    if [ -z "$svc_modes[$i]" ]; then
+	svc_modes[$i]="default"
+    fi
+    (( i++ ))
+    (( i_1++ ))
+    
+done
+
+N=${#svcs[@]}
+if [ "$service_limit" ]; then
+    if (( $service_limit > 0 && $N > $service_limit )); then
+	echo "Services file $infile has more service entries than allowed limit $services, aborting" >&2
+	exit 1
+    fi
+fi
+declare -a params vals cmd_args
+#
+# xml sel  -t -m '//service[2]/param' -v '@name' -v '" "' -v '.'  -n example/gen-multibuild._service
+
+k=0
+k_1=1
+for (( i = 0; i < N ; i++ )); do
+    svc="${svcs[$i]}"
+    odir="$(mktemp -d -p "$serviced")"
+    (( i_1 = i + 1 ))
+    params=($(check_param_names $i_1 ))
+    M=${#params[@]}
+    for (( j = 0 ; j < M ; j++ )); do
+	(( k = 2*j ))
+	(( k_1 = k + 1 ))
+	(( j_1 = j + 1 ))
+	vals[$j]="$(xml sel -t -m "/services/service[$i_1]/param[$j_1]" -v '.' "$infile")"
+	cmd_args[$k]="--${params[$j]}"
+	cmd_args[$k_1]="${vals[$j]}"
+    done
+    (( k = 2 * M ))
+    (( k_1 = k + 1 ))
+    cmd_args[$k]="--outdir"
+    cmd_args[$k_1]="$odir"
+    run "$ul_flags" "$outpath" "$i" "$svc_mode" "$cmd_args[@]"
+done
