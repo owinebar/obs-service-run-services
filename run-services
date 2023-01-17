@@ -2,7 +2,8 @@
 
 full_service="$(realpath "$0")"
 service_name="$(basename "$0")"
-service_dir="$(dirname "$full_service")"
+#service_dir="$(dirname "$full_service")"
+service_dir=/usr/lib/obs/service
 if [ "$service_name" = "bash" ]; then
     echo "Service name not recognized" >&2
     exit 1
@@ -55,15 +56,16 @@ run() {
     local odir="$2"
     local svc_no="$3"
     local svc_mode="$4"
-    shift 4
+    local svc="$5"
+    shift 5
     trap on_error ERR
     if [ "$ul_flags" ]; then
 	## some flags specified
 	( ulimit $ul_flags >/dev/null 2>&1
-	  eval "$@"
+	  "$service_dir/$svc" "$@"
 	)
     else
-	( eval "$@" )
+	"$service_dir/$svc" "$@"
     fi
     local x i M p
     M=${#excluded_output[@]}
