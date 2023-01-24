@@ -1,0 +1,20 @@
+##
+##  System configuration settings for run-services
+##
+
+# system_cpu_limit=""
+# system_memory_limit=""
+# system_stack_limit=""
+# system_file_size_limit=""
+# system_service_limit=""
+# system_allowed_services=""
+
+# Default setting to prevent recursive use of run-services
+system_excluded_services="run-services"
+
+# don't allow rewriting the _service file
+add_excluded_outputs "_service"
+# Example of regular expression 
+# add_excluded_outputs "_service:[^:]+:.*"
+
+

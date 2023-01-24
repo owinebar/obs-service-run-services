@@ -1,5 +1,4 @@
 #!/bin/bash
-
 full_service="$(realpath "$0")"
 service_name="$(basename "$0")"
 #service_dir="$(dirname "$full_service")"
@@ -8,50 +7,89 @@ if [ "$service_name" = "bash" ]; then
     echo "Service name not recognized" >&2
     exit 1
 fi
-#  See regexp-quote.sed for readable,commented version
+DEBUG=${DEBUG:-0}
+source_files="$(ls -A)"
 
 ssed() {
     sed --sandbox -En "$@"
 }
+
+ssed_str() {
+    local text="$1"
+    shift
+    ( set -o pipefail;
+      # ensure we do not add an extra newline at the end
+      printf "%s\n" "$text" |
+	  ssed "$@" |
+	  head -c -1
+      )
+}
+
+ssed_file() {
+    local fn="$1"
+    shift
+    ssed_str "$(< "$fn")" "$@"
+}
+
 legal_name() {
     local s="$1" tmp
     [ "$s" ] || return 1
     printf -v tmp "%q" "$s"
     [ "$s" != "$tmp" ] && return 1
+    [ "${s//:}" != "$s" ] && return 1
     [ "${s/\/}" != "$s" ] && return 1
-    echo "$s"
+    return 0
 }
+
 legal_list() {
     local s="$1" tmp
+    [ -z "$s" ] && return 0
     printf -v tmp "%q" "$s"
     [ "$s" != "$tmp" ] && return 1
     [ "${s/\/}" != "$s" ] && return 1
-    echo "$s"
 }
+
 if ! (legal_name "$service_name" >/dev/null 2>&1); then
     echo "Service name must not contain : or shell special characters: '$service_name'" >&2
     exit 1
 fi
 serviced=$(mktemp -d)
-DEBUG=1
+
 on_error() {
     local last_command="$BASH_COMMAND"
     local last_line="${BASH_LINENO[0]}"
     local last_src="${BASH_SOURCE[0]}"
     echo "Error in service $service_name" >&2
-    if (( $DEBUG )); then
+    if (( DEBUG )); then
 	printf "%s:%s\t%s\n" "$last_src" "$last_line" "$last_command" >&2
+	local k=0
+	x="$(caller $k)"
+	while [ "$x" ]; do
+	    echo "$x";
+	    (( ++k ))
+	    x="$(caller $k)"
+	done
     fi
     exit 1
 }
+
 cleanup() {
    [ -d "$serviced" ] && rm -Rf "$serviced"
 }
+
 trap cleanup EXIT
 trap on_error ERR
 declare -a services
+check_regular_file() {
+    local fn="$1"
+    local tp="$(stat -c %F "$1")"
+    if [ "$tp" != "regular file" ]; then
+	return 1
+    fi
+}
 
 run() {
+    echo run "$@"
     local ul_flags="$1"
     local odir="$2"
     local svc_no="$3"
@@ -59,6 +97,7 @@ run() {
     local svc="$5"
     shift 5
     trap on_error ERR
+    echo "command:  $service_dir/$svc " "$@" >&2
     if [ "$ul_flags" ]; then
 	## some flags specified
 	( ulimit $ul_flags >/dev/null 2>&1
@@ -82,8 +121,12 @@ run() {
 	    fi
 	done
     done
-    for x in ls -A "$odir"; do
-	if [ \! -f "$odir/$x" ]; then
+    echo "ls $odir" >&2
+    ls -Al $odir >&2
+    for x in $(ls -A "$odir"); do
+	
+	if ! check_regular_file "$odir/$x"; then
+	    echo "Ignoring non-file output $odir/$x" >&2
 	    continue
 	fi
 	for (( i = 0; i < M ; i++ )); do
@@ -96,10 +139,10 @@ run() {
 	done
 	case "$svc_mode" in
 	    default | serveronly )
-		cp "$odir/$x" "$outpath/_source:$0:$x"
+		cp --verbose "$odir/$x" "$outpath/_source:$0:$x"
 		;;
 	    *)
-		cp "$odir/$x" "$outpath/$x"
+		cp --verbose "$odir/$x" "$outpath/$x"
 		;;
 	esac
     done
@@ -191,17 +234,19 @@ check_path() {
 	    exit 1
 	    ;;
     esac
-    echo "$tmp"
+    tmp="$(printf "%s" "$tmp" | tr -d '\n')"
+    printf "%s" "$tmp"
 }
 
 check_file_exists() {
     local fname="$1"
+    trap on_error ERR
     if [ \! -e "$fname" ] || [ \! -f "$fname" ]; then
 	echo "File '$fname' does not exist or is not a regular file" >&2
-	exit 1
+	return 1
     fi
+    return 0
 }
-
 check_system_posint() {
     local tmp
     local given="$1"
@@ -235,15 +280,15 @@ check_system_int() {
 available_services() {
     local -a svcs
     local tmp
-    for s in $(ls "$service_dir" | grep -v '.service$'); do
-	! [ -f "$s" ] && continue
-	! [ -x "$s" ] && continue
+    for s in $(ls "$service_dir" | grep -v '\.service$'); do
+	! [ -f "$service_dir/$s" ] && continue
+	! [ -x "$service_dir/$s" ] && continue
 	printf -v tmp "%q" "$s"
 	if [ "$tmp" != "$s" ] || [ "${s//:}" != "$s" ] ; then
 	    echo "Warning: discarding service '$s' due to illegal characters in name" >&2
 	    continue
 	fi
-  	svcs[${#$svcs[@]}]="$s"
+  	svcs[${#svcs[@]}]="$s"
     done
     ( IFS=":"; echo "${svcs[*]}" )
 }
@@ -253,7 +298,7 @@ list_add_elt() {
     local tmp
     #  Ensure we never have any potential problems
     printf -v tmp "%q" "$elt"
-    if [ -z "$s" ] ||
+    if [ -z "$elt" ] ||
 	   [ "$tmp" != "$elt" ] ||
 	   [ "${elt//:}" != "$elt" ] ; then
 	echo "Warning: discarding '$s' due to containing either no or illegal characters" >&2
@@ -274,9 +319,8 @@ list_add_elt() {
 list_member() {
     local elt="$1"
     local ls="$2"
-    case ls in
+    case "$ls" in
 	"$elt":* | *:"$elt" | *:"$elt":* | "$elt")
-	    echo -n "$elt"
 	    return 0
 	    ;;
 	*)
@@ -293,10 +337,10 @@ check_services() {
     local excluded="$2"
     local s ls=""
     if [ -z "$allowed" ]; then
-	allowed="$(available-services)"
+	allowed="$(available_services)"
     fi
     for s in ${allowed//:/ }; do
-	list_member "$s" "$excluded" || continue
+	list_member "$s" "$excluded" && continue
 	ls="$(list_add_elt "$s" "$ls")"
     done
     echo "$ls"
@@ -311,7 +355,13 @@ system_service_limit=""
 system_allowed_services=""
 system_excluded_services=""
 declare -a system_excluded_output
-system_config="/etc/obs/service/$service_name"
+add_system_excluded_outputs() {
+    while (( $# > 0 )); do
+	system_excluded_output[${#system_excluded_output[@]}]="$1"
+	shift
+    done
+}
+system_config="/etc/obs/service/$service_name.system"
 if [ -e "$system_config" ]; then
     . "$system_config"
 fi
@@ -321,13 +371,20 @@ system_memory_limit="$(check_system_posint "${system_memory_limit}" "memory")"
 system_stack_limit="$(check_system_posint "${system_stack_limit}" "stack")"
 system_file_size_limit="$(check_system_posint "${system_file_size_limit}" "file size")"
 system_service_limit="$(check_system_posint "${system_service_limit}" "number of services")"
-system_allowed_services="$(legal_list "${system_allowed_services}")"
+
+if ! legal_list "${system_allowed_services}"; then
+    echo "Allowed services list cannot be processed: '${system_allowed_services}'"
+    exit 1
+fi
+if ! legal_list "${system_excluded_services}"; then
+    echo "Excluded services list cannot be processed: '${system_excluded_services}'"
+    exit 1
+fi
 system_excluded_services="$(list_add_elt "$service_name" "$system_excluded_services")"
-script=""
+
 infile=""
 outfile=""
 outdir=""
-template_file="$(mktemp -p $serviced)"
 cpu_limit=""
 memory_limit=""
 stack_limit=""
@@ -336,8 +393,13 @@ service_limit=""
 allowed_services=""
 excluded_services=""
 declare -a excluded_output
+add_excluded_outputs() {
+    while (( $# > 0 )); do
+	system_excluded_output[${#system_excluded_output[@]}]="$1"
+	shift
+    done
+}
 
-declare -a tmpls tmpl_svcs tmpl_tps
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -369,7 +431,7 @@ while [ $# -gt 0 ]; do
 	    excluded_services="$(list_add_elt "$tmp" "$excluded_services")"
 	    ;;
 	--excluded-output)
-	    excluded_output[${#excluded_output[@]}]="$2"
+	    add_excluded_output "$2"
 	    ;;
 	--outdir)
 	    outdir="$2"
@@ -392,20 +454,32 @@ if [ -z "$outdir" ]; then
     exit 1
 fi
 outpath="$(realpath "${outdir}")"
-tmp="$(dirname "${outpath}")"
-mkdir -p "$tmp"
-if [ \! -d "$tmp" ]; then
+echo "outpath=$outpath"
+#tmp="$(dirname "${outpath}")"
+mkdir -p "$outpath"
+if [ \! -d "$outpath" ]; then
     echo "Destination directory for $outfile in $outdir does not exist and could not be created" >&2
     exit 1
 fi
+   
+   # Setup source files in outdir for services to run
+for x in $(ls -A); do
+    if [ -L "$x" ]; then
+	echo "Ignoring link $x in source directory" >&2
+	continue
+    fi
+    ln -s "$(realpath "$x")" "$outpath/$(basename $x)"
+done
+
 # Set up allowed/excluded service
 tmp="$excluded_services"
 excluded_services="${system_excluded_services}"
 for x in ${tmp/:/ }; do
     excluded_services="$(list_add_elt "$x" "$excluded_services")"
 done
+
 allowed_services="$(check_services "$system_allowed_services" "$excluded_services")"
-declare -a svcs svc_mode
+declare -a svcs svc_modes
 
 ulimit_flags=""
 if [ "$cpu_limit" ]; then
@@ -421,30 +495,50 @@ if [ "$file_size_limit" ]; then
     ulimit_flags="$ulimit_flags -f $file_size_limit"
 fi
 
+read_paramfile() {
+    exec 20<&0
+    exec <"$1"
+}
 
+close_paramfile() {
+    exec <&20
+    exec 20<&-
+}
 
 check_param_names() {
     local svc_no="$1"
-    local -a pnames
+    local -a pnames name
     local tmp
-    xml sel -t -m '/services/service[$svc_no]/param/@name' -v '.' -n "$infile" | while read -a name; do
+    local paramfile=$(mktemp -p $serviced)
+    xml sel -t -m "/services/service[$svc_no]/param/@name" -v '.' -n "$infile" >$paramfile
+    read_paramfile $paramfile
+    while read -a name; do
 	if (( ${#name[@]} != 1 )); then
 	    echo "Illegal parameter name: ${name[@]}" >&2
+	    close_paramfile
 	    exit 1
 	fi
 	printf -v tmp "%q" "$name"
 	if [ "$tmp" != "$name" ]; then
 	    echo "Illegal parameter name: ${name}" >&2
+	    close_paramfile
 	    exit 1
 	fi
 	pnames[${#pnames[@]}]="$name"
     done
-    echo "${pnames[@]}"
+    close_paramfile
+    echo "Params (${#pnames[@]}): ${pnames[@]}" >&2
+    echo "${pnames[@]}" 
 }
 
 i=0
 i_1=1
-xml sel -t -m '/services/service/@name' -v '.' -n "$infile" | while read -a name; do
+svcfile=$(mktemp -p $serviced)
+xml sel -t -m '/services/service/@name' -v '.' -n "$infile" >"$svcfile"
+echo Services file $svcfile
+exec 10<&0
+exec <$svcfile
+while read -a name; do
     if (( ${#name[@]} != 1 )); then
 	echo "Illegal service name: ${name[@]}" >&2
 	exit 1
@@ -454,15 +548,15 @@ xml sel -t -m '/services/service/@name' -v '.' -n "$infile" | while read -a name
 	exit 1
     fi
     svcs[$i]="$name"
-    svc_modes[$i]="$(xml_sel -t -m '/services/service[$i_1]/@mode' -v '.')"
+    svc_modes[$i]="$(xml sel -t -m "/services/service[$i_1]/@mode" -v '.' "$infile")"
     if [ -z "$svc_modes[$i]" ]; then
 	svc_modes[$i]="default"
     fi
-    (( i++ ))
-    (( i_1++ ))
-    
+    (( ++i ))
+    (( ++i_1 ))
 done
-
+exec <&10
+exec 10<&-
 N=${#svcs[@]}
 if [ "$service_limit" ]; then
     if (( $service_limit > 0 && $N > $service_limit )); then
@@ -476,24 +570,39 @@ declare -a params vals cmd_args
 
 k=0
 k_1=1
+echo "Main loop"
 for (( i = 0; i < N ; i++ )); do
     svc="${svcs[$i]}"
     odir="$(mktemp -d -p "$serviced")"
-    (( i_1 = i + 1 ))
+    echo "Service $i/$N $svc $odir"
+    (( i_1 = i + 1 , 1 ))
+    # reset these variables every iteration
+    unset params cmd_args vals
+    declare -a params cmd_args vals
     params=($(check_param_names $i_1 ))
     M=${#params[@]}
+    echo "Service $i has $M parameters" >&2
+    echo "${params[@]}" >&2
+    k=0
+    k_1=1
     for (( j = 0 ; j < M ; j++ )); do
-	(( k = 2*j ))
-	(( k_1 = k + 1 ))
-	(( j_1 = j + 1 ))
+	(( k = 2*j ,
+	   k_1 = k + 1,
+	   j_1 = j + 1,
+	   1
+	 ))
 	vals[$j]="$(xml sel -t -m "/services/service[$i_1]/param[$j_1]" -v '.' "$infile")"
 	cmd_args[$k]="--${params[$j]}"
 	cmd_args[$k_1]="${vals[$j]}"
     done
-    (( k = 2 * M ))
-    (( k_1 = k + 1 ))
-    odir="$(mktemp -d -p $serviced)"
+    (( k = 2 * M ,
+       k_1 = k + 1 ,
+       1
+     ))
     cmd_args[$k]="--outdir"
     cmd_args[$k_1]="$odir"
-    run "$ul_flags" "$odir" "$i" "$svc_mode" "$cmd_args[@]"
+    (
+	cd "$outpath"
+	run "$ul_flags" "$odir" "$i" "$svc_mode" "$svc" "${cmd_args[@]}"
+    )
 done
